@@ -1,17 +1,21 @@
 import socket
 import selectors
-import threading
-from ClientHandler import ClientHandler
+import threading #uses threading module to create a separate thread for the shutdown_listener method
+import logging
 
 PORT_FILE = "myport.info"
 DEFAULT_PORT = 1357
+MAX_CONNECTIONS = 100
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class Server:
     def __init__(self):
         self.port = self.get_port()
         self.selector = selectors.DefaultSelector()
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.clients = []
+        self.clients = set()
+        self.clients_lock = threading.Lock()
         self.running = True
 
     def get_port(self):
@@ -19,38 +23,73 @@ class Server:
             with open(PORT_FILE, "r") as file:
                 port_data = file.read().strip()
                 if not port_data:
-                    print("Warning: Port file is empty. Using default port.") 
+                    logging.warning(f"Port file is empty. Using default port {DEFAULT_PORT}")
                     return DEFAULT_PORT
-                return int(port_data) if port_data else DEFAULT_PORT
+                return int(port_data) # if port_data else DEFAULT_PORT
         except (FileNotFoundError):
-            print("Warning: Port file not found. Using default port.")
+            logging.warning("Port file not found. Using default port.")
             return DEFAULT_PORT
         except (ValueError):
-            print("Warning: Port file contains invalid data. Using default port.")
+            logging.warning("Port file contains invalid data. Using default port.")
             return DEFAULT_PORT
         
-    def start(self):
-        self.server_socket.bind(("0.0.0.0", self.port))
-        self.server_socket.listen()
-        print(f"Server listening on port {self.port}")
+    def accept(self, sock, _):
+        try:
+            conn, addr = sock.accept()
+            conn.setblocking(False)
+            logging.info(f"Accepted connection from {addr}")
+            with self.clients_lock:
+                self.clients.add(conn)
+            self.selector.register(conn, selectors.EVENT_READ, self.read)
+        except OSError:
+            logging.error("Error accepting new connection")
 
-        threading.Thread(target=self.shutdown, daemon=True).start()
+    def read(self, conn, _):
+        try:
+            data = conn.recv(1024)
+            if data:
+                logging.info(f"Recieved from {conn.getpeername()}: {data.decode()}")
+                conn.sendall(data)
+            else:
+                self.close_connection(conn)
+        except ConnectionResetError:
+            logging.warning(f"Connection reset by peer {conn.getpeername()}")
+            self.close_connection(conn)
+        except Exception as e:
+            logging.error(f"Unexpected error with {conn.getpeername()}: {e}")
+            self.close_connection(conn)
 
-        while self.running:
-            try:
-                client_socket, address = self.server_socket.accept()
-                client_handler = ClientHandler(client_socket, address)
-                threading.Thread(target=client_handler.handle, daemon=True).start()
-                self.clients.append(client_handler)
-                print(f"Number of clients: {len(self.clients)}")
-            except OSError as e:
-                print(f"Error accepting client: {e}")
-                break
+    def close_connection(self, conn):
+        try:
+            logging.info(f"Closing connection to {conn.getpeername()}")
+            self.selector.unregister(conn)
+            with self.clients_lock:
+                self.clients.discard(conn)
+            conn.close()
+        except Exception as e:
+            logging.error(f"Error closing connection: {e}")
 
-    def shutdown(self):
+    def shutdown_listener(self):
         while self.running:
             if input().strip().lower() == "q":
                 self.running = False
-                self.server_socket.close()
-                print("Server shutting down...")
                 break
+
+    def start(self):
+        self.server_socket.bind(("0.0.0.0", self.port))
+        self.server_socket.listen(MAX_CONNECTIONS)
+        self.server_socket.setblocking(False)
+        self.selector.register(self.server_socket, selectors.EVENT_READ, self.accept)
+        logging.info(f"Server is listening on port {self.port}... Press 'q' to shutdown.")
+
+        threading.Thread(target=self.shutdown_listener, daemon=True).start()
+
+        while self.running:
+            events = self.selector.select(timeout=1)
+            for key, mask in events:
+                callback = key.data
+                callback(key.fileobj, mask)
+            
+        logging.info("Server shutting down...")
+        self.selector.close()
+        self.server_socket.close()
