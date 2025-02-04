@@ -1,6 +1,5 @@
 import sqlite3
 import logging
-import os
 import threading
 
 class DatabaseManager:
@@ -24,6 +23,7 @@ class DatabaseManager:
         self.cursor.execute('''CREATE TABLE IF NOT EXISTS clients(
             ID BLOB PRIMARY KEY,
             UserName TEXT NOT NULL,
+            PublicKey BLOB NOT NULL,
             LastSeen TEXT
         )''')
 
@@ -38,9 +38,9 @@ class DatabaseManager:
         self.conn.commit()
         logging.info("Database initialized.")
 
-    def add_client(self, client_id, username, last_seen):
+    def add_client(self, client_id, username, public_key, last_seen):
         with self._lock:
-            self.cursor.execute("INSERT INTO clients (ID, UserName, LastSeen) VALUES (?, ?, ?)", (client_id, username, last_seen))
+            self.cursor.execute("INSERT INTO clients (ID, UserName, PublicKey, LastSeen) VALUES (?, ?, ?, ?)", (client_id, username, public_key, last_seen))
             self.conn.commit()
 
     def get_clients(self):
@@ -50,7 +50,7 @@ class DatabaseManager:
         
     def add_message(self, to_client, from_client, msg_type, content):
         with self._lock:
-            self.cursor.execute("INSERT IMTO messages (ToClient, FromClient, Type, Content) VALUES (?, ?, ?, ?)", (to_client, from_client, msg_type, content))
+            self.cursor.execute("INSERT INTO messages (ToClient, FromClient, Type, Content) VALUES (?, ?, ?, ?)", (to_client, from_client, msg_type, content))
             self.conn.commit()
 
     def get_pending_messages(self, client_id):

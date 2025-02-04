@@ -2,6 +2,7 @@ import socket
 import selectors
 import threading #uses threading module to create a separate thread for the shutdown_listener method
 import logging
+from DatabaseManager import DatabaseManager 
 
 PORT_FILE = "myport.info"
 DEFAULT_PORT = 1357
@@ -17,6 +18,7 @@ class Server:
         self.clients = set()
         self.clients_lock = threading.Lock()
         self.running = True
+        self.db = DatabaseManager()
 
     def get_port(self):
         try: 
@@ -49,7 +51,8 @@ class Server:
             data = conn.recv(1024)
             if data:
                 logging.info(f"Recieved from {conn.getpeername()}: {data.decode()}")
-                conn.sendall(data)
+                self.db.add_message(b"client_id", b"server", 3, data)
+                conn.sendall(b"Message received and stored.")
             else:
                 self.close_connection(conn)
         except ConnectionResetError:
@@ -58,6 +61,15 @@ class Server:
         except Exception as e:
             logging.error(f"Unexpected error with {conn.getpeername()}: {e}")
             self.close_connection(conn)
+            
+    def register_client(self, client_id, username, public_key):
+        logging.info(f"Registering client {username} with ID {client_id}")
+        self.db.add_client(client_id, username, public_key, "Not Available")
+        return b"Client registered successfully."
+    
+    def retrieve_clients(self):
+        clients = self.db.get_clients()
+        return str(clients).encode()
 
     def close_connection(self, conn):
         try:
