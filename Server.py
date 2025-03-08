@@ -2,13 +2,19 @@ import socket
 import selectors
 import threading #uses threading module to create a separate thread for the shutdown_listener method
 import logging
-from DatabaseManager import DatabaseManager 
-
-PORT_FILE = "myport.info"
-DEFAULT_PORT = 1357
-MAX_CONNECTIONS = 100
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+import struct
+from DatabaseManager import DatabaseManager
+from RequestsHandler import (
+    RequestData,
+    RequestHandler, 
+    RegistrationHandler, 
+    RetrieveClientsHandler, 
+    RetrievePublicKeyHandler,
+    SendMessageHandler,
+    RetrievePendingMessageHandler
+)
+from config import PORT_FILE, DEFAULT_PORT, MAX_CONNECTIONS, HEADER_SIZE
+import request_status_codes as request_status
 
 class Server:
     def __init__(self):
@@ -19,6 +25,15 @@ class Server:
         self.clients_lock = threading.Lock()
         self.running = True
         self.db = DatabaseManager()
+
+        # request dispathcer dictionary to handle different requests
+        self.request_handlers = {
+            request_status.REGISTER_CLIENT: RegistrationHandler(request_status.REGISTER_CLIENT, self.db),
+            request_status.LIST_ALL_CLIENTS: RetrieveClientsHandler(request_status.LIST_ALL_CLIENTS, self.db),
+            request_status.FETCH_PUBLIC_KEY: RetrievePublicKeyHandler(request_status.FETCH_PUBLIC_KEY, self.db),
+            request_status.SEND_MESSAGE: SendMessageHandler(request_status.SEND_MESSAGE, self.db),
+            request_status.LIST_PENDING_MESSAGES: RetrievePendingMessageHandler(request_status.LIST_PENDING_MESSAGES, self.db)
+        }
 
     def get_port(self):
         try: 
@@ -35,7 +50,7 @@ class Server:
             logging.warning("Port file contains invalid data. Using default port.")
             return DEFAULT_PORT
         
-    def accept(self, sock, _):
+    def accept(self, sock: socket.socket, _):
         try:
             conn, addr = sock.accept()
             conn.setblocking(False)
@@ -46,32 +61,46 @@ class Server:
         except OSError:
             logging.error("Error accepting new connection")
 
-    def read(self, conn, _):
+    def read(self, conn: socket.socket, _):
         try:
-            data = conn.recv(1024)
-            if data:
-                logging.info(f"Recieved from {conn.getpeername()}: {data.decode()}")
-                self.db.add_message(b"client_id", b"server", 3, data)
-                conn.sendall(b"Message received and stored.")
-            else:
+            header_data = conn.recv(HEADER_SIZE)
+            if not header_data:
                 self.close_connection(conn)
-        except ConnectionResetError:
-            logging.warning(f"Connection reset by peer {conn.getpeername()}")
-            self.close_connection(conn)
-        except Exception as e:
-            logging.error(f"Unexpected error with {conn.getpeername()}: {e}")
-            self.close_connection(conn)
+                return
+            if len(header_data) < HEADER_SIZE:
+                logging.error("Incomplete header received.")
+                self.close_connection(conn)
+                return
             
-    def register_client(self, client_id, username, public_key):
-        logging.info(f"Registering client {username} with ID {client_id}")
-        self.db.add_client(client_id, username, public_key, "Not Available")
-        return b"Client registered successfully."
-    
-    def retrieve_clients(self):
-        clients = self.db.get_clients()
-        return str(clients).encode()
+            header_format = "<16s B H I"
+            client_id, version, code, payload_size = struct.unpack(header_format, header_data)
+            payload = b""
 
-    def close_connection(self, conn):
+            while len(payload) < payload_size:
+                chunk = conn.recv(payload_size - len(payload))
+                if not chunk:
+                    break
+                payload += chunk
+            if len(payload) != payload_size:
+                logging.error("Incomplete payload received.")
+                self.close_connection(conn)
+                return
+            
+            logging.info(f"Received request: client_id: {client_id.hex()}, version: {version}, code: {code}, payload size: {payload_size}")
+
+            # Dispatch request to the appropriate handler based on the request code.
+            if (code not in self.request_handlers):
+                raise ValueError(f"Invalid request code: {code}")
+    
+            handler: RequestHandler = self.request_handlers.get(code)
+            handler.handle(RequestData(client_id, version, code, payload_size, payload), conn)
+
+            self.db.update_last_seen(client_id)
+        except Exception as e:
+            logging.error(f"Error reading request: {e}")
+            self.close_connection(conn)
+
+    def close_connection(self, conn: socket.socket):
         try:
             logging.info(f"Closing connection to {conn.getpeername()}")
             self.selector.unregister(conn)
