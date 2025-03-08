@@ -39,19 +39,40 @@ class DatabaseManager:
         logging.info("Database initialized.")
 
     def add_client(self, client_id, username, public_key, last_seen):
-        with self._lock:
-            self.cursor.execute("INSERT INTO clients (ID, UserName, PublicKey, LastSeen) VALUES (?, ?, ?, ?)", (client_id, username, public_key, last_seen))
-            self.conn.commit()
+        try:
+            with self._lock:
+                self.cursor.execute("INSERT INTO clients (ID, UserName, PublicKey, LastSeen) VALUES (?, ?, ?, ?)", (client_id, username, public_key, last_seen))
+                self.conn.commit()
+                return True
+        except sqlite3.IntegrityError as e:
+            logging.error(f"Integrity error adding client: {e}")
+            return False
 
     def get_clients(self):
         with self._lock:
             self.cursor.execute("SELECT ID, UserName, LastSeen FROM clients")
             return self.cursor.fetchall()
         
+    def get_client_by_username(self, username):
+        with self._lock:
+            self.cursor.execute("SELECT ID FROM clients WHERE UserName = ?", (username,))
+            return self.cursor.fetchone()
+    
+    def get_client_by_id(self, client_id):
+        with self._lock:
+            self.cursor.execute("SELECT ID, UserName, PublicKey, LastSeen FROM clients WHERE ID = ?", (client_id,))
+            return self.cursor.fetchone()
+        
+    def update_last_seen(self, client_id):
+        with self._lock:
+            self.cursor.execute("UPDATE clients SET LastSeen = datetime('now') WHERE ID = ?", (client_id,))
+            self.conn.commit()
+        
     def add_message(self, to_client, from_client, msg_type, content):
         with self._lock:
             self.cursor.execute("INSERT INTO messages (ToClient, FromClient, Type, Content) VALUES (?, ?, ?, ?)", (to_client, from_client, msg_type, content))
             self.conn.commit()
+            return self.cursor.lastrowid 
 
     def get_pending_messages(self, client_id):
         with self._lock:
